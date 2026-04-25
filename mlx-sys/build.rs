@@ -8,15 +8,13 @@ fn target_is_ios() -> bool {
     env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios")
 }
 
-/// Locate the Xcode clang runtime directory and return `(search_dir, link_name)`.
+/// Locate the Xcode clang runtime directory for macOS builds.
 ///
-/// Both `libclang_rt.osx.a` (macOS) and `libclang_rt.ios.a` (iOS) live in the
-/// same `…/XcodeDefault.xctoolchain/…/lib/darwin/` directory, so we scan once
-/// and choose the right library name based on the target.
-///
-/// This symbol is needed for `___isPlatformVersionAtLeast` on macOS 26+ and for
-/// platform-version guards in MLX's C++ runtime on iOS.
-fn find_clang_rt() -> Option<(String, &'static str)> {
+/// Returns the `lib/darwin/` path that contains `libclang_rt.osx.a`.
+/// Only called on macOS — on iOS the `___isPlatformVersionAtLeast` symbol is
+/// provided by the system runtime so no explicit link is needed, and trying to
+/// link the fat `libclang_rt.ios.a` causes a build error on cross-compiles.
+fn find_clang_rt_macos() -> Option<String> {
     let output = Command::new("xcode-select")
         .args(["--print-path"])
         .output()
@@ -32,19 +30,11 @@ fn find_clang_rt() -> Option<(String, &'static str)> {
         developer_dir
     );
 
-    // Both osx and ios archives sit in the same `darwin/` subdirectory; pick
-    // the one that matches our target so the linker gets iOS slices for iOS.
-    let (lib_file, link_name): (&str, &str) = if target_is_ios() {
-        ("libclang_rt.ios.a", "clang_rt.ios")
-    } else {
-        ("libclang_rt.osx.a", "clang_rt.osx")
-    };
-
     let clang_dir = std::fs::read_dir(&toolchain_base).ok()?;
     for entry in clang_dir.flatten() {
         let darwin_path = entry.path().join("lib/darwin");
-        if darwin_path.join(lib_file).exists() {
-            return Some((darwin_path.to_string_lossy().to_string(), link_name));
+        if darwin_path.join("libclang_rt.osx.a").exists() {
+            return Some(darwin_path.to_string_lossy().to_string());
         }
     }
 
@@ -133,12 +123,16 @@ fn build_and_link_mlx_c() {
         {
             println!("cargo:rustc-link-lib=framework=Accelerate");
         }
-    }
 
-    // Link the Xcode clang runtime for `___isPlatformVersionAtLeast`.
-    if let Some((search_dir, lib_name)) = find_clang_rt() {
-        println!("cargo:rustc-link-search={}", search_dir);
-        println!("cargo:rustc-link-lib=static={}", lib_name);
+        // Link the Xcode clang runtime for `___isPlatformVersionAtLeast`.
+        // Needed on macOS 26+ where the bundled LLVM runtime may be outdated.
+        // See: https://github.com/conda-forge/llvmdev-feedstock/issues/244
+        // Not needed on iOS — the system runtime provides the symbol, and the
+        // fat libclang_rt.ios.a causes a build error in Rust's cross-compile.
+        if let Some(clang_rt_path) = find_clang_rt_macos() {
+            println!("cargo:rustc-link-search={}", clang_rt_path);
+            println!("cargo:rustc-link-lib=static=clang_rt.osx");
+        }
     }
 }
 
