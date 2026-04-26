@@ -3,9 +3,24 @@ extern crate cmake;
 use cmake::Config;
 use std::{env, path::PathBuf, process::Command};
 
-/// True when Cargo is cross-compiling for an iOS device (aarch64-apple-ios).
+/// True when Cargo is cross-compiling for an iOS device or simulator.
 fn target_is_ios() -> bool {
     env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios")
+}
+
+/// True when the iOS target is the simulator (aarch64-apple-ios-sim or
+/// x86_64-apple-ios). Cargo sets `CARGO_CFG_TARGET_ABI=sim` for the modern
+/// arm64 simulator triple, and the legacy x86_64-apple-ios triple is
+/// simulator-only on Apple Silicon dev toolchains.
+fn target_is_ios_simulator() -> bool {
+    if !target_is_ios() {
+        return false;
+    }
+    if env::var("CARGO_CFG_TARGET_ABI").as_deref() == Ok("sim") {
+        return true;
+    }
+    // x86_64-apple-ios is always the simulator (no x86_64 iOS hardware exists).
+    env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
 }
 
 /// Locate the Xcode clang runtime directory for macOS builds.
@@ -43,31 +58,46 @@ fn find_clang_rt_macos() -> Option<String> {
 
 fn build_and_link_mlx_c() {
     let is_ios = target_is_ios();
+    let is_ios_sim = target_is_ios_simulator();
     let mut config = Config::new("src/mlx-c");
     config.very_verbose(true);
     config.define("CMAKE_INSTALL_PREFIX", ".");
+    // mlx-c's examples link against tools that don't cross-compile cleanly
+    // (they assume host architecture). The Rust bindings don't need them.
+    config.define("MLX_C_BUILD_EXAMPLES", "OFF");
 
     if is_ios {
-        // Cross-compile for an iOS device (arm64).
-        // Setting CMAKE_SYSTEM_NAME=iOS causes CMake to select the iphoneos SDK
-        // automatically; we pin the sysroot explicitly for hermeticity.
+        // Cross-compile for an iOS device or simulator.
+        // Setting CMAKE_SYSTEM_NAME=iOS makes CMake select the right SDK
+        // based on CMAKE_OSX_SYSROOT; we pin the sysroot explicitly via
+        // xcrun for hermeticity.
+        let sdk_name = if is_ios_sim { "iphonesimulator" } else { "iphoneos" };
         let sdk_path = Command::new("xcrun")
-            .args(["--sdk", "iphoneos", "--show-sdk-path"])
+            .args(["--sdk", sdk_name, "--show-sdk-path"])
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .unwrap_or_default();
         let sdk_path = sdk_path.trim().to_string();
 
+        // CMake uses "iOS" for both device and simulator; the sysroot
+        // distinguishes them. The arch is determined by the Cargo target.
+        let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "arm64".into());
+        let cmake_arch = match arch.as_str() {
+            "aarch64" => "arm64",
+            other => other,
+        };
+
         config.define("CMAKE_SYSTEM_NAME", "iOS");
-        config.define("CMAKE_OSX_ARCHITECTURES", "arm64");
+        config.define("CMAKE_OSX_ARCHITECTURES", cmake_arch);
         // MLX uses C++17 standard library features that require iOS 16+.
         config.define("CMAKE_OSX_DEPLOYMENT_TARGET", "16.0");
         if !sdk_path.is_empty() {
             config.define("CMAKE_OSX_SYSROOT", &sdk_path);
         }
-        // Metal and Accelerate are always available on iOS devices; the CPU
-        // fallback paths MLX uses on macOS don't apply to iOS.
+        // The simulator runs on the host (Mac); arm64 simulator on Apple
+        // Silicon supports Metal, but we keep Accelerate ON for both since
+        // it ships in the simulator SDK as well.
         config.define("MLX_BUILD_METAL", "ON");
         config.define("MLX_BUILD_ACCELERATE", "ON");
     } else {
