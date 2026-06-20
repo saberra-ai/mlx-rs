@@ -111,6 +111,11 @@ fn build_and_link_mlx_c() {
         #[cfg(feature = "metal")]
         {
             config.define("MLX_BUILD_METAL", "ON");
+            // Target the Metal 4 toolchain on macOS 26 (Tahoe). Matches
+            // ollama's `mlx_metal_v4` preset; without it the metallib is built
+            // for the host default and MLX's runtime JIT path fails on Tahoe
+            // ("[metal::Device] Unable to build metal library from source").
+            config.define("CMAKE_OSX_DEPLOYMENT_TARGET", "26.0");
         }
 
         #[cfg(feature = "accelerate")]
