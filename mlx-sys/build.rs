@@ -116,6 +116,18 @@ fn build_and_link_mlx_c() {
             // for the host default and MLX's runtime JIT path fails on Tahoe
             // ("[metal::Device] Unable to build metal library from source").
             config.define("CMAKE_OSX_DEPLOYMENT_TARGET", "26.0");
+            // CMAKE_OSX_DEPLOYMENT_TARGET reaches the kernel *compile* step
+            // (MLX passes it as `-mmacosx-version-min`, so each `.air` is built
+            // for Metal 4 → AIR 2.8), but MLX's metallib *link* step
+            // (`xcrun -sdk macosx metal *.air -o mlx.metallib`) passes no
+            // version flag. Without a matching deployment target in the env,
+            // `air-lld` links for the host default (AIR 2.7) and SILENTLY drops
+            // every 2.8 kernel — producing a 118-byte empty metallib and, at
+            // runtime, "[metal::Device] Unable to load kernel …". Exporting the
+            // env var makes the un-flagged link inherit Metal 4 (AIR 2.8) so the
+            // kernels are actually linked. See saberra-ai/Pio investigation
+            // 2026-07-06 (gemma-4-12b MLX 8-bit).
+            config.env("MACOSX_DEPLOYMENT_TARGET", "26.0");
         }
 
         #[cfg(feature = "accelerate")]
